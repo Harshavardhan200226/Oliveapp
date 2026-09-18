@@ -1,0 +1,8 @@
+target/
+.settings/
+.project
+.classpath
+uploads/*
+!.gitignore
+*.log
+.DS_Store
