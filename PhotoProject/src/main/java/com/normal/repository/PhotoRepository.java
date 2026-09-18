@@ -1,10 +1,18 @@
 package com.normal.repository;
 
-import com.normal.entity.Photo;
-import org.springframework.data.jpa.repository.JpaRepository;
 import java.util.List;
 
-public interface PhotoRepository extends JpaRepository<Photo, Long> {
-    List<Photo> findByEventId(Long eventId);
-    List<Photo> findByEventIdAndStatus(Long eventId, Photo.PhotoStatus status);
+import com.normal.entity.Photo;
+import com.normal.entity.Photo.Status;
+
+public interface PhotoRepository {
+
+	List<Photo> findByEventId(Long eventId);
+
+	List<Photo> findByEventIdAndStatus(Long eventId, Status published);
+
+	Object findById(Long photoId);
+
+	void save(Photo photo);
+
 }

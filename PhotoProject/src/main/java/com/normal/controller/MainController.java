@@ -1,19 +1,12 @@
-package com.normal.controller;
+package com.trizen.photoshare.controller;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -22,88 +15,103 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
-import com.normal.entity.Event;
 import com.normal.entity.Photo;
 import com.normal.repository.EventRepository;
 import com.normal.repository.PhotoRepository;
+import com.normal.service.CloudStorageService;
+
+import io.micrometer.observation.Observation.Event;
 
 @RestController
 @RequestMapping("/api")
-@CrossOrigin(origins = "*") 
 public class MainController {
 
     @Autowired private EventRepository eventRepository;
     @Autowired private PhotoRepository photoRepository;
+    @Autowired private CloudStorageService cloudStorageService;
 
-    private final String UPLOAD_DIR = "uploads/";
-
+    // Admin Route: Create Event
     @PostMapping("/admin/events")
-    public ResponseEntity<Event> createEvent(@RequestBody Event event) {
-        return ResponseEntity.ok(eventRepository.save(event));
+    public ResponseEntity<?> createEvent(@RequestBody Event event) {
+        Event saved = eventRepository.save(event);
+        return ResponseEntity.ok(saved);
     }
 
+    // Team Member Route: Multi-part Photo Upload to Cloud
     @PostMapping("/team/events/{eventId}/upload")
-    public ResponseEntity<String> uploadPhotos(
+    public ResponseEntity<?> uploadPhotos(
             @PathVariable Long eventId,
-            @RequestParam(value="uploadedBy", required=false,defaultValue="Anonymous") String uploadedBy,
-            @RequestParam("files") MultipartFile[] files) throws IOException {
+            @RequestParam("files") MultipartFile[] files,
+            @RequestParam("uploadedBy") String uploadedBy) {
 
-        Optional<Event> eventOpt = eventRepository.findById(eventId);
-        if (eventOpt.isEmpty()) return ResponseEntity.badRequest().body("Event not found");
-
-        Files.createDirectories(Paths.get(UPLOAD_DIR));
+        Event event = eventRepository.findById(eventId).orElseThrow();
 
         for (MultipartFile file : files) {
-            String fileName = UUID.randomUUID() + "_" + file.getOriginalFilename();
-            Path path = Paths.get(UPLOAD_DIR + fileName);
-            Files.write(path, file.getBytes());
+            try {
+                Map uploadResult = cloudStorageService.uploadFile(file);
+                String cloudUrl = uploadResult.get("secure_url").toString();
 
-            Photo photo = new Photo();
-            photo.setEvent(eventOpt.get());
-            photo.setFileName(file.getOriginalFilename());
-            photo.setStorageUrl("/uploads/" + fileName);
-            photo.setUploadedBy(uploadedBy);
-            photo.setStatus(Photo.PhotoStatus.PENDING);
+                Photo photo = new Photo();
+                photo.setFileName(file.getOriginalFilename());
+                photo.setStorageLocation(cloudUrl);
+                photo.setFileSize(file.getSize());
+                photo.setUploadedBy(uploadedBy);
+                photo.setEvent(event);
+                photo.setStatus(Photo.Status.PENDING);
 
-            photoRepository.save(photo);
+                photoRepository.save(photo);
+            } catch (IOException e) {
+                return ResponseEntity.internalServerError().body("Cloud upload failed");
+            }
         }
-
-        return ResponseEntity.ok("Files uploaded successfully for approval.");
+        return ResponseEntity.ok(Map.of("message", "Files uploaded successfully!"));
     }
 
+    // Admin Route: Fetch pending photos
     @GetMapping("/admin/events/{eventId}/photos")
-    public ResponseEntity<List<Photo>> getAdminPhotos(@PathVariable Long eventId) {
-        return ResponseEntity.ok(photoRepository.findByEventId(eventId));
+    public List<Photo> getEventPhotos(@PathVariable Long eventId) {
+        return photoRepository.findByEventId(eventId);
     }
 
-    @PatchMapping("/admin/photos/{photoId}/status")
-    public ResponseEntity<Photo> updatePhotoStatus(
+    // Admin Route: Moderate Photo Status
+    @PostMapping("/admin/photos/{photoId}/status")
+    public ResponseEntity<?> updatePhotoStatus(
             @PathVariable Long photoId,
-            @RequestParam Photo.PhotoStatus status) {
+            @RequestParam Photo.Status status) {
 
-        Optional<Photo> photoOpt = photoRepository.findById(photoId);
-        if (photoOpt.isEmpty()) return ResponseEntity.notFound().build();
-
-        Photo photo = photoOpt.get();
+        Photo photo = photoRepository.findById(photoId).orElseThrow();
         photo.setStatus(status);
-        return ResponseEntity.ok(photoRepository.save(photo));
+        photoRepository.save(photo);
+        return ResponseEntity.ok(Map.of("message", "Photo status updated to " + status));
     }
 
-    // Customer: View Gallery with PIN Validation
+    // Admin Route: Publish Gallery
+    @PostMapping("/admin/events/{eventId}/publish")
+    public ResponseEntity<?> publishGallery(@PathVariable Long eventId) {
+        Event event = eventRepository.findById(eventId).orElseThrow();
+        event.setGalleryPublished(true);
+        eventRepository.save(event);
+        return ResponseEntity.ok(Map.of("message", "Gallery published!"));
+    }
+
+    // Customer Route: Protected Access by PIN
     @PostMapping("/public/events/{eventId}/gallery")
     public ResponseEntity<?> getCustomerGallery(
             @PathVariable Long eventId,
-            @RequestBody Map<String, String> payload) {
+            @RequestBody Map<String, String> body) {
 
-        Optional<Event> eventOpt = eventRepository.findById(eventId);
-        if (eventOpt.isEmpty()) return ResponseEntity.badRequest().body("Invalid Event");
+        String pin = body.get("pin");
+        Event event = eventRepository.findById(eventId).orElseThrow();
 
-        String pin = payload.get("pin");
-        if (!eventOpt.get().getPinCode().equals(pin)) {
-            return ResponseEntity.status(401).body("Invalid PIN code");
+        if (!event.isGalleryPublished()) {
+            return ResponseEntity.status(403).body(Map.of("message", "Gallery not published yet!"));
         }
 
-        List<Photo> publishedPhotos = photoRepository.findByEventIdAndStatus(eventId, Photo.PhotoStatus.PUBLISHED);
+        if (!event.getPinCode().equals(pin)) {
+            return ResponseEntity.status(401).body(Map.of("message", "Invalid PIN Code!"));
+        }
+
+        List<Photo> publishedPhotos = photoRepository.findByEventIdAndStatus(eventId, Photo.Status.PUBLISHED);
         return ResponseEntity.ok(publishedPhotos);
     }
 }
